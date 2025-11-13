@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container mt-4">
+    <h2>{{ post.titulo }}</h2>
+    <p>{{ post.contenido }}</p>
+    <p class="text-muted">Publicado por {{ post.usuario.username }} el {{ post.timestamp.strftime('%d/%m/%Y %H:%M') }}</p>
+
+    <hr>
+    <h4>Comentarios</h4>
+    {% for comentario in post.comentarios %}
+        <div class="mb-2">
+            <strong>{{ comentario.usuario.username }}</strong> 
+            <small class="text-muted">{{ comentario.timestamp.strftime('%d/%m/%Y %H:%M') }}</small>
+            <p>{{ comentario.texto }}</p>
+        </div>
+    {% else %}
+        <p>No hay comentarios aún.</p>
+    {% endfor %}
+
+    <hr>
+    <h5>Agregar un comentario</h5>
+    <form method="POST" action="{{ url_for('ver_post', post_id=post.id) }}">
+        {{ form.hidden_tag() }}
+        <div class="mb-3">
+            {{ form.texto.label(class="form-label") }}
+            {{ form.texto(class="form-control") }}
+            {% for error in form.texto.errors %}
+                <div class="text-danger">{{ error }}</div>
+            {% endfor %}
+        </div>
+        {{ form.submit(class="btn btn-success") }}
+    </form>
+</div>
+{% endblock %}
