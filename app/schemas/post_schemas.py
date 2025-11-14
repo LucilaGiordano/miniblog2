@@ -1,9 +1,9 @@
 from app import ma
 from marshmallow import fields, validate
 
-# Importamos el schema de Categoría (asumiendo que no está en un ciclo)
+# Importamos el schema de Categoría 
 from .category_schemas import CategoriaSchema 
-# ¡IMPORTANTE! Eliminamos la importación directa de ComentarioSchema para romper el ciclo.
+# 🚨 CORRECCIÓN CLAVE: Se elimina la importación directa para romper el ciclo
 # from .comment_schemas import ComentarioSchema
 
 class PostSchema(ma.Schema):
