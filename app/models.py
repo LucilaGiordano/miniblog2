@@ -7,52 +7,53 @@ import enum
 
 # --- Modelos de Base de Datos ---
 
-# Enum para definir los roles
+# Enum para definir los roles (NOMENCLATURA UNIFICADA)
 class RoleName(enum.Enum):
     ADMIN = "admin"
     EDITOR = "editor"
     READER = "reader"
 
-# Tabla de Roles (nueva)
+# Tabla de Roles
 class Role(db.Model):
     __tablename__ = 'roles'
     id = db.Column(db.Integer, primary_key=True)
-    # El tipo String(20) es suficiente para almacenar el nombre del rol (admin, editor, reader)
-    name = db.Column(db.Enum(RoleName), unique=True, nullable=False) 
-    
-    # Relación uno-a-muchos con la tabla Usuario (un rol tiene muchos usuarios)
-    usuarios = db.relationship('Usuario', backref='role', lazy=True) 
+    name = db.Column(db.Enum(RoleName), unique=True, nullable=False)
+
+    usuarios = db.relationship('Usuario', backref='role', lazy=True)
 
     def __repr__(self):
         return f"Role('{self.name.value}')"
 
-# Tabla de Usuarios (CORREGIDA: Usamos 'Usuario' para mantener tu convención)
+# Tabla de Usuarios
 class Usuario(db.Model, UserMixin):
     __tablename__ = 'usuarios'
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(64), index=True, unique=True)
     email = db.Column(db.String(120), index=True, unique=True)
     password_hash = db.Column(db.String(256))
-    
-    # Clave Foránea para el rol
-    # Se eliminó el default, la asignación se hará en el código de registro
+
+    # FK al rol
     role_id = db.Column(db.Integer, db.ForeignKey('roles.id'), nullable=False)
 
-    # Relaciones: Un usuario puede tener varios posts y varios comentarios.
-    # El backref debe apuntar al nombre de la clase, que es 'Usuario'
+    # NEW
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    # Relaciones
     posts = db.relationship('Post', backref='author', lazy='dynamic')
     comments = db.relationship('Comment', backref='commenter', lazy='dynamic')
 
     def __repr__(self):
         return f'<Usuario {self.username}>'
 
+    # Utilidades para password
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
-
+    
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
 
-# Tabla de Categorías (sin cambios)
+# Tabla de Categorías
 class Category(db.Model):
     __tablename__ = 'categories'
     id = db.Column(db.Integer, primary_key=True)
@@ -67,12 +68,10 @@ class Post(db.Model):
     title = db.Column(db.String(128))
     body = db.Column(db.Text)
     timestamp = db.Column(db.DateTime, index=True, default=datetime.utcnow)
-    
-    # Claves Foráneas
-    user_id = db.Column(db.Integer, db.ForeignKey('usuarios.id')) # Referencia a la tabla 'usuarios'
+
+    user_id = db.Column(db.Integer, db.ForeignKey('usuarios.id'))
     category_id = db.Column(db.Integer, db.ForeignKey('categories.id'))
-    
-    # Relación con comentarios
+
     comments = db.relationship('Comment', backref='post', lazy='dynamic', cascade="all, delete-orphan")
 
 # Tabla de Comentarios
@@ -81,10 +80,11 @@ class Comment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     body = db.Column(db.String(256))
     timestamp = db.Column(db.DateTime, index=True, default=datetime.utcnow)
-    
-    # Claves Foráneas
-    user_id = db.Column(db.Integer, db.ForeignKey('usuarios.id')) # Referencia a la tabla 'usuarios'
+
+    user_id = db.Column(db.Integer, db.ForeignKey('usuarios.id'))
     post_id = db.Column(db.Integer, db.ForeignKey('posts.id'))
+
+    is_visible = db.Column(db.Boolean, default=True, nullable=False)
 
 # --- Esquemas de Marshmallow ---
 
@@ -93,60 +93,47 @@ class RoleSchema(ma.SQLAlchemyAutoSchema):
         model = Role
         load_instance = True
         include_relationships = True
-        fields = ('id', 'name') # Solo exponemos el nombre del rol
+        fields = ('id', 'name')
 
-# Esquema para Usuario (CORREGIDO: Usamos 'Usuario' y añadimos el campo de rol)
 class UsuarioSchema(ma.SQLAlchemyAutoSchema):
-    # Usamos Nested para incluir la información del Rol
-    role = fields.Nested(RoleSchema, only=("name",), required=True) 
+    role = fields.Nested(RoleSchema, only=("name",), required=True)
 
     class Meta:
         model = Usuario
         load_instance = True
         include_relationships = True
-        # Excluimos el password_hash por seguridad
-        fields = ('id', 'username', 'email', 'role') 
+        fields = ('id', 'username', 'email', 'role')
 
-# Esquema para Post
 class PostSchema(ma.SQLAlchemyAutoSchema):
-    # Anidamos el esquema de Usuario para exponer el autor
-    author = fields.Nested(UsuarioSchema, only=("id", "username", "email", "role")) 
-    # Anidamos el esquema de Categoría
+    author = fields.Nested(UsuarioSchema, only=("id", "username", "email", "role"))
     category = fields.Nested('CategorySchema', only=("id", "name"))
-    
-    # Hacemos que los IDs de las claves foráneas sean cargables/editables
+
     user_id = fields.Int(required=False, load_only=True)
     category_id = fields.Int(required=True, load_only=True)
 
     class Meta:
         model = Post
         load_instance = True
-        include_fk = True # Incluir claves foráneas en la carga (load)
-        # Campos que se serializarán (dump)
-        fields = ('id', 'title', 'body', 'timestamp', 'author', 'category') 
+        include_fk = True
+        fields = ('id', 'title', 'body', 'timestamp', 'author', 'category')
 
-# Esquema para Comentario
 class CommentSchema(ma.SQLAlchemyAutoSchema):
-    # Anidamos el esquema de Usuario para exponer el autor del comentario
     commenter = fields.Nested(UsuarioSchema, only=("id", "username", "role"))
-    
-    # Campos que se serializarán (dump)
+
     class Meta:
         model = Comment
         load_instance = True
         include_fk = True
         fields = ('id', 'body', 'timestamp', 'user_id', 'post_id', 'commenter')
 
-# Esquema para Categoría
 class CategorySchema(ma.SQLAlchemyAutoSchema):
-    # Campos que se serializarán (dump)
     class Meta:
         model = Category
         load_instance = True
         include_relationships = True
         fields = ('id', 'name', 'description')
 
-# Inicialización de instancias de esquemas
+# Instancias
 usuario_schema = UsuarioSchema()
 usuarios_schema = UsuarioSchema(many=True)
 

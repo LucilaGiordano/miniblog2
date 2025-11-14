@@ -7,12 +7,11 @@ class Post(db.Model):
     title = db.Column(db.String(255), nullable=False)
     body = db.Column(db.Text, nullable=False)
     status = db.Column(db.String(20), default='draft', nullable=False)
-    
+
+    # NEW (para alinearlo a la consigna)
+    is_published = db.Column(db.Boolean, default=False, nullable=False)
+
     timestamp = db.Column(db.DateTime, index=True, default=datetime.utcnow)
     last_edited = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # Clave foránea que apunta a la tabla 'usuarios'
     author_id = db.Column(db.Integer, db.ForeignKey('usuarios.id'), nullable=False)
-
-    def __repr__(self):
-        return f'<Post {self.id}: {self.title}>'
