@@ -1,153 +1,193 @@
 from flask.views import MethodView
-from flask import request, jsonify, g
-from app import db # Asume que 'db' es tu instancia de SQLAlchemy
-from ..models import Post, Usuario, Categoria
-from ..schemas.post_schemas import PostSchema
-from ..schemas.category_schemas import CategoriaSchema # Usado para serializar categorías
-from ..decorators.auth_decorators import check_ownership # ✅ CORRECCIÓN RELATIVA
-from flask_jwt_extended import jwt_required, get_jwt_identity
-from sqlalchemy.orm.exc import NoResultFound
+from flask import request, jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity, verify_jwt_in_request
 from sqlalchemy.exc import IntegrityError
+from .. import db
+from ..models import Post, Usuario, Category, RoleName, post_schema, posts_schema
 
-# Instanciamos los schemas
-post_schema = PostSchema()
-posts_schema = PostSchema(many=True)
-category_schema = CategoriaSchema() # Lo necesitamos para obtener instancias
+# Función de utilidad para verificar el rol del usuario actual
+def is_allowed(allowed_roles):
+    """
+    Verifica si el usuario autenticado tiene uno de los roles permitidos.
+    Retorna (True, current_user, None) si el rol es suficiente.
+    Retorna (False, response, status_code) si falla la autenticación o la autorización.
+    """
+    try:
+        # Asegura que haya un token JWT válido
+        verify_jwt_in_request()
+        user_id = get_jwt_identity()
+        current_user = db.session.get(Usuario, user_id)
+        
+        if not current_user:
+            return False, jsonify({"msg": "Usuario no encontrado."}), 404
+
+        # Obtener el nombre del rol del usuario (Ej: 'admin', 'editor', 'reader')
+        user_role_name = current_user.role.name.value
+        
+        if user_role_name in allowed_roles:
+            return True, current_user, None
+        else:
+            return False, jsonify({"msg": "Acceso denegado. Rol insuficiente."}), 403
+            
+    except Exception as e:
+        # Maneja errores de JWT (token expirado, inválido, etc.)
+        return False, jsonify({"msg": "Token inválido o requerido."}), 401
+
+
+# ----------------------------------------------------------------------------------
+# PostListAPI - GET (Listar Posts) y POST (Crear Nuevo Post)
+# ----------------------------------------------------------------------------------
 
 class PostListAPI(MethodView):
-    """
-    Maneja GET (lista de posts) y POST (crear nuevo post).
-    """
 
-    # Endpoint público: Obtener todos los posts
+    # GET: Listar todos los posts (Acceso Público)
     def get(self):
-        # Solo mostramos posts publicados
-        posts = Post.query.filter_by(is_published=True).order_by(Post.timestamp.desc()).all()
-        return jsonify(posts_schema.dump(posts)), 200
+        try:
+            # Ordenamos por timestamp descendente (los más nuevos primero)
+            posts = db.session.execute(db.select(Post).order_by(Post.timestamp.desc())).scalars().all()
+            result = posts_schema.dump(posts)
+            return jsonify(result), 200
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"msg": f"Error al recuperar posts: {e}"}), 500
 
-    # Endpoint privado: Crear un nuevo post
+    # POST: Crear un nuevo post (Requiere ADMIN o EDITOR)
     @jwt_required()
     def post(self):
-        # 🛑 CORRECCIÓN CLAVE: Convertir la identidad (string) a int antes de usarla como FK.
-        user_id = int(get_jwt_identity())
+        # 1. Verificar Permisos
+        # Solo ADMIN y EDITOR pueden crear posts
+        allowed_roles = [RoleName.ADMIN.value, RoleName.EDITOR.value]
+        is_ok, current_user, status_code = is_allowed(allowed_roles)
         
-        # 1. Validar los datos de entrada
-        data = request.json
-        try:
-            validated_data = post_schema.load(data)
-        except Exception as e:
-            return jsonify({"errors": str(e)}), 400
-        
-        # 2. Crear el Post base
-        new_post = Post(
-            titulo=validated_data['titulo'],
-            contenido=validated_data['contenido'],
-            usuario_id=user_id, # Usamos el ID convertido a int
-        )
-        
-        # 3. Manejar Categorías (Relación Muchos a Muchos)
-        categoria_ids = validated_data.get('categoria_ids', [])
-        
-        if categoria_ids:
-            # Buscamos las instancias de Categoría por los IDs
-            categorias = Categoria.query.filter(Categoria.id.in_(categoria_ids)).all()
-            
-            if len(categorias) != len(set(categoria_ids)):
-                return jsonify({"msg": "Una o más IDs de categoría son inválidas o inexistentes."}), 400
-            
-            # Asignamos las categorías al nuevo post
-            new_post.categorias.extend(categorias)
+        if not is_ok:
+            # is_ok es False, devolvemos la respuesta de error y el código de estado
+            return current_user, status_code 
 
-        db.session.add(new_post)
+        json_data = request.get_json()
+        
+        # 2. Deserializar/Validar la entrada con Marshmallow
         try:
+            # Los campos user_id y category_id se esperan en la carga (load)
+            post_data = post_schema.load(json_data)
+        except Exception as err:
+            return jsonify(err.messages), 400
+
+        # 3. Verificar que la categoría existe (Importante para la integridad)
+        category_id = post_data.get('category_id')
+        category = db.session.get(Category, category_id)
+        if category is None:
+            return jsonify({"msg": f"La categoría con ID {category_id} no existe."}), 400
+
+        # 4. Crear el nuevo objeto Post
+        new_post = Post(
+            title=post_data.get('title'),
+            body=post_data.get('body'),
+            user_id=current_user.id, # El autor siempre es el usuario autenticado
+            category_id=category_id
+        )
+
+        try:
+            db.session.add(new_post)
             db.session.commit()
-            return jsonify({
-                "msg": "Post creado exitosamente.",
-                "post": post_schema.dump(new_post)
-            }), 201
+            # 5. Serializar la respuesta
+            return post_schema.jsonify(new_post), 201
         except Exception as e:
             db.session.rollback()
-            return jsonify({"error": "Error al guardar el post.", "details": str(e)}), 500
+            return jsonify({"msg": f"Error al crear el post: {e}"}), 500
 
+
+# ----------------------------------------------------------------------------------
+# PostDetailAPI - GET (Post por ID), PUT (Editar Post), DELETE (Eliminar Post)
+# ----------------------------------------------------------------------------------
 
 class PostDetailAPI(MethodView):
-    """
-    Maneja GET (detalle), PUT (editar), DELETE (eliminar) de un post específico.
-    """
 
-    # Endpoint público: Obtener detalle de un post
+    # GET: Obtener un post específico (Acceso Público)
     def get(self, post_id):
-        try:
-            # Solo mostramos si está publicado
-            post = Post.query.filter_by(id=post_id, is_published=True).one()
-            return jsonify(post_schema.dump(post)), 200
-        except NoResultFound:
-            return jsonify({"msg": "Post no encontrado o no publicado."}), 404
-    
-    # Endpoint privado: Editar un post
+        post = db.session.get(Post, post_id)
+        if post is None:
+            return jsonify({"msg": "Post no encontrado"}), 404
+        
+        # Serializar y devolver el post
+        return post_schema.jsonify(post), 200
+
+    # PUT: Editar un post (Requiere ADMIN o ser el autor)
     @jwt_required()
     def put(self, post_id):
-        post = Post.query.get_or_404(post_id)
-        
-        # Obtenemos el ID del usuario dueño del recurso.
-        # En este caso, el dueño del recurso es el usuario_id del Post.
-        if not check_ownership(post.usuario_id):
-            return jsonify({"msg": "Acceso denegado. No eres el autor de este post ni administrador."}), 403
+        # 1. Obtener el Post
+        post = db.session.get(Post, post_id)
+        if post is None:
+            return jsonify({"msg": "Post no encontrado"}), 404
 
-        # 1. Validar los datos de entrada (permitimos actualización parcial)
-        data = request.json
+        # 2. Verificar Permisos (Admin o Autor)
+        allowed_roles = [RoleName.ADMIN.value] # Solo ADMIN tiene permiso absoluto para editar cualquier post
+        is_admin_ok, user_or_response, status_code = is_allowed(allowed_roles)
+
+        if not is_admin_ok:
+            # Si no es ADMIN, comprobamos si es el autor del post
+            current_user_id = get_jwt_identity()
+            if post.user_id != current_user_id:
+                # El usuario no es ADMIN ni el autor
+                return jsonify({"msg": "Acceso denegado. Solo el autor del post o un ADMIN pueden editarlo."}), 403
+            
+        # Si llegamos aquí, es ADMIN o el AUTOR.
+
+        json_data = request.get_json()
+        
+        # 3. Deserializar/Validar la entrada con Marshmallow
         try:
-            validated_data = post_schema.load(data, partial=True)
-        except Exception as e:
-            return jsonify({"errors": str(e)}), 400
+            # Usamos partial=True para permitir la actualización parcial de campos
+            post_data = post_schema.load(json_data, partial=True)
+        except Exception as err:
+            return jsonify(err.messages), 400
 
-        # 2. Actualizar campos
-        post.titulo = validated_data.get('titulo', post.titulo)
-        post.contenido = validated_data.get('contenido', post.contenido)
-        post.is_published = validated_data.get('is_published', post.is_published)
-        
-        # 3. Manejar la actualización de Categorías
-        if 'categoria_ids' in validated_data:
-            categoria_ids = validated_data['categoria_ids']
-            
-            # Limpiamos las categorías existentes
-            post.categorias.clear()
-            
-            if categoria_ids:
-                # Buscamos las nuevas instancias de Categoría
-                categorias = Categoria.query.filter(Categoria.id.in_(categoria_ids)).all()
-                
-                if len(categorias) != len(set(categoria_ids)):
-                    return jsonify({"msg": "Una o más IDs de categoría son inválidas o inexistentes."}), 400
-                
-                # Asignamos las nuevas categorías
-                post.categorias.extend(categorias)
+        # 4. Verificar que la nueva categoría (si se proporciona) existe
+        category_id = post_data.get('category_id')
+        if category_id is not None:
+            category = db.session.get(Category, category_id)
+            if category is None:
+                return jsonify({"msg": f"La categoría con ID {category_id} no existe."}), 400
 
+        # 5. Actualizar el objeto Post
+        post.title = post_data.get('title', post.title)
+        post.body = post_data.get('body', post.body)
+        post.category_id = category_id if category_id is not None else post.category_id
 
-        # 4. Guardar cambios en la DB
         try:
             db.session.commit()
-            return jsonify({
-                "msg": "Post actualizado exitosamente.",
-                "post": post_schema.dump(post)
-            }), 200
+            # 6. Serializar la respuesta
+            return post_schema.jsonify(post), 200
         except Exception as e:
             db.session.rollback()
-            return jsonify({"error": "Error al actualizar el post.", "details": str(e)}), 500
+            return jsonify({"msg": f"Error al actualizar el post: {e}"}), 500
 
-    # Endpoint privado: Eliminar un post
+    # DELETE: Eliminar un post (Requiere ADMIN o ser el autor)
     @jwt_required()
     def delete(self, post_id):
-        post = Post.query.get_or_404(post_id)
-        
-        # Obtenemos el ID del usuario dueño del recurso.
-        if not check_ownership(post.usuario_id):
-            return jsonify({"msg": "Acceso denegado. No eres el autor de este post ni administrador."}), 403
+        # 1. Obtener el Post
+        post = db.session.get(Post, post_id)
+        if post is None:
+            return jsonify({"msg": "Post no encontrado"}), 404
 
-        db.session.delete(post)
+        # 2. Verificar Permisos (Admin o Autor)
+        allowed_roles = [RoleName.ADMIN.value] # Solo ADMIN tiene permiso absoluto para eliminar cualquier post
+        is_admin_ok, user_or_response, status_code = is_allowed(allowed_roles)
+
+        if not is_admin_ok:
+            # Si no es ADMIN, comprobamos si es el autor del post
+            current_user_id = get_jwt_identity()
+            if post.user_id != current_user_id:
+                # El usuario no es ADMIN ni el autor
+                return jsonify({"msg": "Acceso denegado. Solo el autor del post o un ADMIN pueden eliminarlo."}), 403
+
+        # Si llegamos aquí, es ADMIN o el AUTOR.
+
         try:
+            # Debido a 'cascade="all, delete-orphan"' en Comment, los comentarios
+            # asociados se eliminarán automáticamente.
+            db.session.delete(post)
             db.session.commit()
-            return jsonify({"msg": f"Post ID {post_id} eliminado exitosamente."}), 204
+            return jsonify({"msg": "Post eliminado exitosamente"}), 200
         except Exception as e:
             db.session.rollback()
-            return jsonify({"error": "Error al eliminar el post.", "details": str(e)}), 500
+            return jsonify({"msg": f"Error al eliminar el post: {e}"}), 500

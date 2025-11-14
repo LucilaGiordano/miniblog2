@@ -1,127 +1,164 @@
 from flask.views import MethodView
 from flask import request, jsonify
-from app import db 
-from ..models import Categoria
-from ..schemas.category_schemas import CategoriaSchema
-from ..decorators.auth_decorators import roles_required 
-from flask_jwt_extended import jwt_required
-from sqlalchemy.orm.exc import NoResultFound
+from flask_jwt_extended import jwt_required, get_jwt_identity, verify_jwt_in_request
 from sqlalchemy.exc import IntegrityError
+from .. import db
+from ..models import Category, Usuario, RoleName, category_schema, categories_schema
 
-# Instanciamos los schemas
-category_schema = CategoriaSchema()
-categories_schema = CategoriaSchema(many=True)
+# Función de utilidad para verificar el rol del usuario actual
+# Copiada aquí para que el archivo sea autocontenido y no dependa de post_views.py
+def is_allowed(allowed_roles):
+    try:
+        verify_jwt_in_request()
+        user_id = get_jwt_identity()
+        current_user = db.session.get(Usuario, user_id)
+        
+        if not current_user:
+            return False, jsonify({"msg": "Usuario no encontrado."}), 404
+
+        user_role_name = current_user.role.name.value
+        
+        if user_role_name in allowed_roles:
+            return True, current_user, None
+        else:
+            return False, jsonify({"msg": "Acceso denegado. Rol insuficiente."}), 403
+            
+    except Exception as e:
+        # Errores de JWT (token expirado, inválido, etc.)
+        print(f"Error de JWT o autenticación: {e}")
+        return False, jsonify({"msg": "Token inválido o requerido."}), 401
+
+# ----------------------------------------------------------------------------------
+# CategoryListAPI - GET (Listar Categorías) y POST (Crear Nueva Categoría)
+# ----------------------------------------------------------------------------------
 
 class CategoryListAPI(MethodView):
-    """
-    Maneja GET (lista de categorías) y POST (crear nueva categoría).
-    """
 
-    # Endpoint público: Obtener todas las categorías
+    # GET: Listar todas las categorías (Acceso Público)
     def get(self):
-        categorias = Categoria.query.all()
-        return jsonify(categories_schema.dump(categorias)), 200
-
-    # Endpoint privado: Crear una nueva categoría (Solo Admin)
-    @jwt_required()
-    @roles_required('admin')
-    def post(self):
-        # 1. Validar los datos de entrada
-        data = request.json
-        if data is None:
-             # Este es un buen punto de control si se sigue viendo el 422
-             return jsonify({"msg": "Error al procesar el JSON: Cuerpo de solicitud vacío o Content-Type incorrecto."}), 400
-        
         try:
-            # load() también verifica campos requeridos como 'nombre'
-            validated_data = category_schema.load(data)
+            categories = db.session.execute(db.select(Category).order_by(Category.id)).scalars().all()
+            result = categories_schema.dump(categories)
+            return jsonify(result), 200
         except Exception as e:
-            return jsonify({"errors": str(e)}), 400
+            db.session.rollback()
+            return jsonify({"msg": f"Error al recuperar categorías: {e}"}), 500
+
+    # POST: Crear una nueva categoría (Requiere ADMIN o EDITOR)
+    @jwt_required()
+    def post(self):
+        # 1. Verificar Permisos
+        allowed_roles = [RoleName.ADMIN.value, RoleName.EDITOR.value]
+        is_ok, _, status_code = is_allowed(allowed_roles)
         
-        # 2. Verificar si la categoría ya existe (IntegrityError lo maneja, pero es mejor dar un mensaje claro)
-        if Categoria.query.filter_by(nombre=validated_data['nombre']).first():
-             return jsonify({"msg": f"La categoría '{validated_data['nombre']}' ya existe."}), 409
+        if not is_ok:
+            return _, status_code # Devuelve el error de permiso (403) o autenticación (401)
+
+        json_data = request.get_json()
         
-        # 3. Crear la Categoría
-        new_category = Categoria(
-            nombre=validated_data['nombre']
+        # 2. Deserializar/Validar la entrada con Marshmallow
+        try:
+            # Usamos load para validar los datos
+            category_data = category_schema.load(json_data)
+        except Exception as err:
+            return jsonify(err.messages), 400
+
+        # 3. Crear el nuevo objeto Category
+        new_category = Category(
+            name=category_data.get('name'),
+            description=category_data.get('description')
         )
 
-        db.session.add(new_category)
         try:
+            db.session.add(new_category)
             db.session.commit()
-            return jsonify({
-                "msg": "Categoría creada exitosamente.",
-                "category": category_schema.dump(new_category)
-            }), 201
+            # 4. Serializar la respuesta
+            return category_schema.jsonify(new_category), 201
         except IntegrityError:
             db.session.rollback()
-            return jsonify({"error": "Error de integridad: La categoría ya existe (posiblemente).", 
-                            "details": "Verifique que el nombre sea único."}), 409
+            return jsonify({"msg": "Error de integridad: Ya existe una categoría con ese nombre."}), 400
         except Exception as e:
             db.session.rollback()
-            return jsonify({"error": "Error al guardar la categoría.", "details": str(e)}), 500
+            return jsonify({"msg": f"Error al crear la categoría: {e}"}), 500
 
+
+# ----------------------------------------------------------------------------------
+# CategoryDetailAPI - GET (Categoría por ID), PUT (Editar Categoría), DELETE (Eliminar Categoría)
+# ----------------------------------------------------------------------------------
 
 class CategoryDetailAPI(MethodView):
-    """
-    Maneja GET (detalle), PUT (editar), DELETE (eliminar) de una categoría específica.
-    """
 
-    # Endpoint público: Obtener detalle de una categoría
+    # GET: Obtener una categoría específica (Acceso Público)
     def get(self, category_id):
-        try:
-            category = Categoria.query.filter_by(id=category_id).one()
-            return jsonify(category_schema.dump(category)), 200
-        except NoResultFound:
-            return jsonify({"msg": "Categoría no encontrada."}), 404
-    
-    # Endpoint privado: Editar una categoría (Solo Admin)
-    @jwt_required()
-    @roles_required('admin')
-    def put(self, category_id):
-        category = Categoria.query.get_or_404(category_id)
+        category = db.session.get(Category, category_id)
+        if category is None:
+            return jsonify({"msg": "Categoría no encontrada"}), 404
         
-        # 1. Validar los datos de entrada (permitimos actualización parcial)
-        data = request.json
+        # Serializar y devolver la categoría
+        return category_schema.jsonify(category), 200
+
+    # PUT: Editar una categoría (Requiere ADMIN o EDITOR)
+    @jwt_required()
+    def put(self, category_id):
+        # 1. Verificar Permisos
+        allowed_roles = [RoleName.ADMIN.value, RoleName.EDITOR.value]
+        is_ok, _, status_code = is_allowed(allowed_roles)
+        
+        if not is_ok:
+            return _, status_code # Devuelve el error de permiso (403) o autenticación (401)
+
+        # 2. Obtener la Categoría
+        category = db.session.get(Category, category_id)
+        if category is None:
+            return jsonify({"msg": "Categoría no encontrada"}), 404
+
+        json_data = request.get_json()
+        
+        # 3. Deserializar/Validar la entrada con Marshmallow
         try:
-            # Usamos partial=True porque solo queremos actualizar el nombre
-            validated_data = category_schema.load(data, partial=True)
-        except Exception as e:
-            return jsonify({"errors": str(e)}), 400
+            # Usamos partial=True para permitir la actualización parcial de campos
+            category_data = category_schema.load(json_data, partial=True)
+        except Exception as err:
+            return jsonify(err.messages), 400
 
-        # 2. Actualizar campo (solo nombre)
-        if 'nombre' in validated_data:
-            category.nombre = validated_data['nombre']
+        # 4. Actualizar el objeto Category
+        category.name = category_data.get('name', category.name)
+        category.description = category_data.get('description', category.description)
 
-        # 3. Guardar cambios en la DB
         try:
             db.session.commit()
-            return jsonify({
-                "msg": "Categoría actualizada exitosamente.",
-                "category": category_schema.dump(category)
-            }), 200
+            # 5. Serializar la respuesta
+            return category_schema.jsonify(category), 200
         except IntegrityError:
             db.session.rollback()
-            return jsonify({"error": "Error: El nombre de la categoría ya está en uso."}), 409
+            return jsonify({"msg": "Error de integridad: Ya existe una categoría con ese nombre."}), 400
         except Exception as e:
             db.session.rollback()
-            return jsonify({"error": "Error al actualizar la categoría.", "details": str(e)}), 500
+            return jsonify({"msg": f"Error al actualizar la categoría: {e}"}), 500
 
-    # Endpoint privado: Eliminar una categoría (Solo Admin)
+    # DELETE: Eliminar una categoría (Requiere ADMIN o EDITOR)
     @jwt_required()
-    @roles_required('admin')
     def delete(self, category_id):
-        category = Categoria.query.get_or_404(category_id)
+        # 1. Verificar Permisos
+        allowed_roles = [RoleName.ADMIN.value, RoleName.EDITOR.value]
+        is_ok, _, status_code = is_allowed(allowed_roles)
         
-        # Opcional: Podrías querer desvincular los posts antes de eliminar la categoría
-        # Pero por ahora, la eliminación está directa.
+        if not is_ok:
+            return _, status_code # Devuelve el error de permiso (403) o autenticación (401)
+
+        # 2. Obtener la Categoría
+        category = db.session.get(Category, category_id)
+        if category is None:
+            return jsonify({"msg": "Categoría no encontrada"}), 404
+
+        # Comprobación adicional: No se puede eliminar una categoría si tiene posts asociados (buena práctica de BD)
+        if category.posts.count() > 0:
+            return jsonify({"msg": "No se puede eliminar la categoría. Primero elimina los posts asociados."}), 409
         
-        db.session.delete(category)
         try:
+            db.session.delete(category)
             db.session.commit()
-            return jsonify({"msg": f"Categoría ID {category_id} eliminada exitosamente."}), 204
+            return jsonify({"msg": "Categoría eliminada exitosamente"}), 200
         except Exception as e:
             db.session.rollback()
-            # Posiblemente Foreign Key error si está vinculada
-            return jsonify({"error": "Error al eliminar la categoría.", "details": str(e)}), 500
+            return jsonify({"msg": f"Error al eliminar la categoría: {e}"}), 500
