@@ -3,6 +3,7 @@ from flask_login import login_user, logout_user, current_user, login_required
 from app.forms import LoginForm, RegisterForm, PostForm, ComentarioForm
 from app.models import Usuario, Post, Comentario, Categoria
 from app import db
+from datetime import datetime
 
 bp = Blueprint('main', __name__)
 
@@ -19,7 +20,8 @@ def inject_categorias():
 @bp.route('/index')
 def index():
     page = request.args.get('page', 1, type=int)
-    posts = Post.query.order_by(Post.timestamp.desc()).paginate(page=page, per_page=5)
+    # Filtra posts publicados
+    posts = Post.query.filter_by(is_published=True).order_by(Post.timestamp.desc()).paginate(page=page, per_page=5)
     return render_template('index.html', posts=posts)
 
 # ----------------------------
@@ -34,8 +36,9 @@ def login():
         user = Usuario.query.filter_by(email=form.email.data).first()
         if user and user.check_password(form.password.data):
             login_user(user, remember=form.remember_me.data)
+            next_page = request.args.get('next')
             flash('Inicio de sesión exitoso', 'success')
-            return redirect(url_for('main.index'))
+            return redirect(next_page or url_for('main.index'))
         else:
             flash('Correo o contraseña incorrectos', 'danger')
     return render_template('login.html', form=form)
@@ -97,12 +100,18 @@ def crear_post():
 def ver_post(post_id):
     post = Post.query.get_or_404(post_id)
     form = ComentarioForm()
+    
+    # Cargar solo comentarios visibles
+    comentarios = Comentario.query.filter_by(post_id=post_id, is_visible=True).order_by(Comentario.created_at.asc()).all()
+    
     if form.validate_on_submit():
         if current_user.is_authenticated:
             comentario = Comentario(
-                texto=form.texto.data,
+                # 🚨 CORRECCIÓN: Usa 'contenido'
+                contenido=form.contenido.data, 
                 autor=current_user,
-                post=post
+                post=post,
+                created_at=datetime.utcnow() # Asegura que se guarde el tiempo
             )
             db.session.add(comentario)
             db.session.commit()
@@ -110,14 +119,77 @@ def ver_post(post_id):
             return redirect(url_for('main.ver_post', post_id=post.id))
         else:
             flash('Debes iniciar sesión para comentar', 'warning')
-            return redirect(url_for('main.login'))
-    return render_template('post.html', post=post, form=form)
+            # Redirigir al login con 'next' para volver aquí
+            return redirect(url_for('main.login', next=request.url))
+            
+    return render_template('post.html', post=post, form=form, comentarios=comentarios)
+
+# ----------------------------
+# EDITAR POST (Ruta que tenías en tu repo)
+# ----------------------------
+@bp.route('/post/editar/<int:post_id>', methods=['GET', 'POST'])
+@login_required
+def editar_post(post_id):
+    post = Post.query.get_or_404(post_id)
+    if post.autor != current_user:
+        flash('No tienes permiso para editar este post.', 'danger')
+        return redirect(url_for('main.ver_post', post_id=post.id))
+        
+    form = PostForm()
+    form.categorias.choices = [(c.id, c.nombre) for c in Categoria.query.all()]
+    
+    if form.validate_on_submit():
+        post.titulo = form.titulo.data
+        post.contenido = form.contenido.data
+        
+        # Actualizar categorías (limpia y vuelve a añadir)
+        post.categorias = []
+        categoria = Categoria.query.get(form.categorias.data)
+        if categoria:
+            post.categorias.append(categoria)
+            
+        db.session.commit()
+        flash('Tu post ha sido actualizado.', 'success')
+        return redirect(url_for('main.ver_post', post_id=post.id))
+    
+    elif request.method == 'GET':
+        form.titulo.data = post.titulo
+        form.contenido.data = post.contenido
+        if post.categorias:
+            form.categorias.data = post.categorias[0].id
+            
+    return render_template('create_post.html', form=form, legend='Editar Post')
+
+# ----------------------------
+# ELIMINAR POST (Ruta que tenías en tu repo)
+# ----------------------------
+@bp.route('/post/eliminar/<int:post_id>', methods=['POST'])
+@login_required
+def eliminar_post(post_id):
+    post = Post.query.get_or_404(post_id)
+    # Verifica si es el autor o un administrador (opcional, basado en roles)
+    if post.autor != current_user: 
+        flash('No tienes permiso para eliminar este post.', 'danger')
+        return redirect(url_for('main.ver_post', post_id=post.id))
+        
+    # Eliminar comentarios asociados (si no se usa cascade delete en el modelo)
+    Comentario.query.filter_by(post_id=post.id).delete()
+    
+    db.session.delete(post)
+    db.session.commit()
+    flash('Tu post ha sido eliminado.', 'success')
+    return redirect(url_for('main.index'))
 
 # ----------------------------
 # POSTS POR CATEGORÍA
 # ----------------------------
 @bp.route('/categoria/<nombre>')
 def posts_por_categoria(nombre):
+    page = request.args.get('page', 1, type=int)
     categoria = Categoria.query.filter_by(nombre=nombre).first_or_404()
-    posts = Post.query.join(Post.categorias).filter(Categoria.id == categoria.id).order_by(Post.timestamp.desc()).all()
-    return render_template('index.html', posts=posts)
+    # Filtra solo posts publicados
+    posts = Post.query.join(Post.categorias).filter(
+        Categoria.id == categoria.id, Post.is_published == True
+    ).order_by(Post.timestamp.desc()).paginate(page=page, per_page=5)
+    
+    return render_template('index.html', posts=posts, title=f'Posts en {nombre}')

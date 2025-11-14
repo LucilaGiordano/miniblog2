@@ -6,12 +6,13 @@ from marshmallow import fields, validate
 class UsuarioSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = Usuario
-        # Los campos que queremos ver son:
+        # El campo 'created_at' ahora existe en el modelo y funcionará.
         load_instance = True
         fields = ('id', 'username', 'email', 'role', 'created_at')
 
 # Instancia para serializar un solo usuario
 usuario_schema = UsuarioSchema()
+usuarios_schema = UsuarioSchema(many=True)
 
 # --- 2. Schema para REGISTRO (LOAD) ---
 # Incluye el campo 'password' para la entrada, que no es parte del modelo final.

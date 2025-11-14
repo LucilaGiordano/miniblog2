@@ -1,12 +1,11 @@
 from flask.views import MethodView
 from flask import request, jsonify
-from app import db # Asume que 'db' es tu instancia de SQLAlchemy
-from ..models import Comentario, Post
-# Importamos las instancias serializadoras
+from app import db 
+from ...models import Comentario, Post
+# Importamos las instancias del esquema corregido
 from ..schemas.comment_schemas import comentario_schema, comentarios_schema 
-from ..decorators.auth_decorators import check_ownership
-from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
-from sqlalchemy.orm.exc import NoResultFound
+from ...decorators.auth_decorators import check_ownership # Usamos el decorador de verificación
+from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt # get_jwt para el rol
 
 class CommentListAPI(MethodView):
     """
@@ -21,43 +20,39 @@ class CommentListAPI(MethodView):
         if not post:
             return jsonify({"msg": "Post no encontrado o no publicado."}), 404
         
-        # 2. Obtener solo comentarios visibles y ordenar por fecha (ascendente para hilo)
+        # 2. Obtener solo comentarios visibles y ordenar por fecha (ascendente para el hilo)
         comentarios = Comentario.query.filter_by(
             post_id=post_id, 
             is_visible=True
-        ).order_by(Comentario.created_at.asc()).all() # Ordenamos ASC para un hilo de comentarios lógico
+        ).order_by(Comentario.created_at.asc()).all() 
         
         return jsonify(comentarios_schema.dump(comentarios)), 200
 
     # Endpoint privado: Crear un nuevo comentario
     @jwt_required()
     def post(self, post_id):
-        # 🛑 Obtener ID de usuario del token
+        # Obtener ID de usuario del token
         user_id = int(get_jwt_identity())
         
-        # 1. Validar si el Post existe (no importa si está publicado aquí, el post es válido)
+        # 1. Validar si el Post existe
         post = Post.query.get(post_id)
         if not post:
             return jsonify({"msg": "No se puede comentar: Post no encontrado."}), 404
             
-        # 2. Validar los datos de entrada (solo necesitamos 'contenido')
+        # 2. Validar los datos de entrada (se espera 'contenido')
         data = request.json
         try:
-            # Usamos 'contenido' en lugar de 'texto' (actualización de schema)
             validated_data = comentario_schema.load(data) 
         except Exception as e:
             return jsonify({"errors": str(e)}), 400
         
         # 3. Crear el Comentario
-        # Por defecto, is_visible es True o False dependiendo de tu modelo, 
-        # pero aquí lo creamos con el campo 'contenido'
         new_comment = Comentario(
-            contenido=validated_data['contenido'],
+            contenido=validated_data['contenido'], # Usa 'contenido'
             usuario_id=user_id, 
             post_id=post_id
         )
-        
-        # Aquí puedes añadir lógica de moderación: si el usuario es nuevo, poner is_visible=False
+        # Nota: Asumimos que el modelo asigna is_visible=True o el valor por defecto
 
         db.session.add(new_comment)
         try:
@@ -81,17 +76,17 @@ class CommentDetailAPI(MethodView):
     @jwt_required()
     def put(self, post_id, comment_id):
         # 1. Buscar el comentario y verificar que pertenezca al post_id
-        # ✅ CAMBIO CRUCIAL: Usamos post_id en el filtro
+        # 🚨 CAMBIO CLAVE: Filtra por ambos IDs para el ruteo anidado
         comentario = Comentario.query.filter_by(id=comment_id, post_id=post_id).first()
         
         if not comentario:
             return jsonify({"msg": "Comentario no encontrado o no pertenece a este post."}), 404
 
-        # 2. Verificar propiedad (autor o admin)
+        # 2. Verificar propiedad (autor o admin/moderador)
         if not check_ownership(comentario.usuario_id):
-            return jsonify({"msg": "Acceso denegado. No eres el autor de este comentario ni administrador."}), 403
+            return jsonify({"msg": "Acceso denegado. No eres el autor de este comentario ni administrador/moderador."}), 403
 
-        # 3. Validar los datos de entrada (permitimos actualización parcial)
+        # 3. Validar los datos de entrada
         data = request.json
         try:
             validated_data = comentario_schema.load(data, partial=True)
@@ -99,7 +94,7 @@ class CommentDetailAPI(MethodView):
             return jsonify({"errors": str(e)}), 400
 
         # 4. Actualizar campos
-        comentario.contenido = validated_data.get('contenido', comentario.contenido)
+        comentario.contenido = validated_data.get('contenido', comentario.contenido) # Usa 'contenido'
         
         # 5. Manejar la moderación de 'is_visible'
         user_claims = get_jwt()
@@ -109,9 +104,7 @@ class CommentDetailAPI(MethodView):
             if user_claims.get('role') in ['admin', 'moderator']:
                 comentario.is_visible = validated_data['is_visible']
             else:
-                # Si no es admin/moderator, y trata de cambiar 'is_visible', ignoramos o devolvemos error.
-                # Elegimos devolver error si se intentó cambiar un campo restringido.
-                return jsonify({"msg": "No tienes permiso para modificar el estado de visibilidad de este comentario."}), 403
+                return jsonify({"msg": "No tienes permiso para modificar el estado de visibilidad."}), 403
 
         # 6. Guardar cambios en la DB
         try:
@@ -128,7 +121,7 @@ class CommentDetailAPI(MethodView):
     @jwt_required()
     def delete(self, post_id, comment_id):
         # 1. Buscar el comentario y verificar que pertenezca al post_id
-        # ✅ CAMBIO CRUCIAL: Usamos post_id en el filtro
+        # 🚨 CAMBIO CLAVE: Filtra por ambos IDs para el ruteo anidado
         comentario = Comentario.query.filter_by(id=comment_id, post_id=post_id).first()
 
         if not comentario:

@@ -5,17 +5,22 @@ from flask_migrate import Migrate
 from flask_jwt_extended import JWTManager
 from datetime import timedelta
 from flask_marshmallow import Marshmallow 
+from flask_login import LoginManager # Importación necesaria
 
 # Inicializaciones fuera de la función de fábrica (factory function)
 db = SQLAlchemy()
 migrate = Migrate()
 jwt = JWTManager()
 ma = Marshmallow() 
+login_manager = LoginManager()
+login_manager.login_view = 'login_api' # Ajuste
+login_manager.login_message_category = 'info'
+
 
 def create_app(config_class=None):
     app = Flask(__name__)
 
-    # Configuración (asume que existe Config en el nivel superior)
+    # Configuración
     if config_class:
         app.config.from_object(config_class)
     else:
@@ -36,15 +41,17 @@ def create_app(config_class=None):
     migrate.init_app(app, db)
     jwt.init_app(app)
     ma.init_app(app) 
+    login_manager.init_app(app) 
 
     # --- FIX CLAVE PARA EL ERROR 'Subject must be a string' (422) ---
     @jwt.user_identity_loader
     def user_identity_lookup(user_id):
-        # **Asegura que el ID de usuario siempre sea un string para el token.**
+        # Asegura que el ID de usuario siempre sea un string para el token.
         return str(user_id) 
 
     @jwt.user_lookup_loader
     def user_lookup_callback(_jwt_header, jwt_data):
+        # Importación de modelos DENTRO de la función para el JWT callback
         from .models import Usuario 
         identity = jwt_data["sub"]
         try:
@@ -75,5 +82,4 @@ def create_app(config_class=None):
 
     return app
 
-# Importación de modelos para que Flask-Migrate los detecte
-from . import models
+# ELIMINADA la importación de modelos que estaba fuera de create_app.

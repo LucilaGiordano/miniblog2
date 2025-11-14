@@ -35,20 +35,19 @@ def roles_required(*roles):
 def check_ownership(resource_owner_id):
     """
     Verifica si el usuario actual es el dueño del recurso. 
-    Permite acceso total si el rol es 'admin'.
+    Permite acceso total si el rol es 'admin' o 'moderator'.
     
     :param resource_owner_id: ID del usuario que creó el recurso (Post o Comentario).
-    :return: True si es dueño o admin, False en caso contrario.
+    :return: True si es dueño o admin/moderador, False en caso contrario.
     """
     # 1. Obtener los datos del token
     claims = get_jwt()
     
-    # 🛑 CORRECCIÓN CLAVE: El identity de JWT es un string. Lo convertimos a int para compararlo
-    # con el ID del recurso (que es int) y evitar el error "Subject must be a string"
+    # Obtener el ID del usuario del token (debe ser int)
     current_user_id = int(get_jwt_identity()) 
 
-    # 2. El administrador siempre puede realizar la operación
-    if claims.get('role') == 'admin':
+    # 2. El administrador/moderador siempre pueden realizar la operación
+    if claims.get('role') in ['admin', 'moderator']:
         return True
     
     # 3. El usuario puede modificar/eliminar si es el dueño del recurso
